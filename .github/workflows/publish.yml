@@ -1,0 +1,59 @@
+name: Publicar WMS sem PAT
+on:
+  push:
+    branches: [main]
+    paths: ['wms-piloto-publicacao.zip']
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: wms-pages
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'kennidyroger04-wq/wms-piloto'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validar pacote e preparar site
+        run: |
+          python3 - <<'PY'
+          import hashlib, io, json, re
+          from pathlib import Path, PurePosixPath
+          from zipfile import ZipFile
+          with ZipFile('wms-piloto-publicacao.zip') as outer:
+              if sorted(outer.namelist()) != ['pilot-config.json','wms-m17-github-pages.zip'] or sum(x.file_size for x in outer.infolist()) > 20*1024*1024:
+                  raise SystemExit('Pacote de transferência inesperado.')
+              data=outer.read('wms-m17-github-pages.zip')
+              config=json.loads(outer.read('pilot-config.json'))
+          if hashlib.sha256(data).hexdigest() != '4c1b1b3c570ae804667471ce6844ead287e0958369f40f0ed8055c2965f505a4':
+              raise SystemExit('ZIP estático não corresponde à versão aprovada.')
+          if set(config) != {'url','key','restaurant'} or config['url'] != 'https://xeyxoetdtgqhtlesfdme.supabase.co' or not re.fullmatch(r'sb_publishable_[A-Za-z0-9_-]{16,}',config['key']) or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}',config['restaurant'],re.I):
+              raise SystemExit('Configuração pública inválida.')
+          site=Path('_site')
+          site.mkdir()
+          with ZipFile(io.BytesIO(data)) as archive:
+              if len(archive.infolist()) > 100 or sum(item.file_size for item in archive.infolist()) > 20*1024*1024:
+                  raise SystemExit('Tamanho do artefato inesperado.')
+              for item in archive.infolist():
+                  path=PurePosixPath(item.filename)
+                  allowed=path.as_posix() in {'.nojekyll','index.html','manifest.webmanifest','install.js','sw-m13.js','favicon.ico','modelo-catalogo.csv','modelo-catalogo.xlsx','modelo-faturamento.csv','modelo-faturamento.xlsx','modelo-movimentacoes.csv','modelo-movimentacoes.xlsx','exemplo-nfe.xml'} or (path.parts[:2]==('_expo','static') and path.suffix in {'.js','.css'}) or (path.parts[:1]==('assets',) and path.suffix=='.wasm') or path.as_posix() in {'icons/wms-192.png','icons/wms-512.png','icons/apple-touch-icon.png'}
+                  if not allowed or path.is_absolute() or '..' in path.parts or chr(92) in item.filename:
+                      raise SystemExit('Entrada não permitida no artefato.')
+                  target=site.joinpath(*path.parts)
+                  target.parent.mkdir(parents=True,exist_ok=True)
+                  target.write_bytes(archive.read(item))
+          (site/'pilot-config.json').write_text(json.dumps(config)+'\n')
+          PY
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - uses: actions/deploy-pages@v4
+        id: deploy
