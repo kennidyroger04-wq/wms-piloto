@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   publish:
-    if: github.repository == 'kennidyroger04-wq/wms-piloto'
+    if: github.repository == 'kennidyroger04-wq/wms-piloto' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -22,35 +22,60 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Validar pacote e preparar site
+      - name: Validar pacote aprovado e preparar site
         run: |
           python3 - <<'PY'
           import hashlib, io, json, re
           from pathlib import Path, PurePosixPath
           from zipfile import ZipFile
+          releases = {
+              'wms-m17-github-pages.zip': ('4c1b1b3c570ae804667471ce6844ead287e0958369f40f0ed8055c2965f505a4','#0f172a'),
+              'wms-m18-github-pages.zip': ('dc55e5c5741745f4ae4613606220460ffc51a927d6120855cdafcfb7e79472db','#800b25'),
+          }
           with ZipFile('wms-piloto-publicacao.zip') as outer:
-              if sorted(outer.namelist()) != ['pilot-config.json','wms-m17-github-pages.zip'] or sum(x.file_size for x in outer.infolist()) > 20*1024*1024:
+              names = outer.namelist()
+              if (len(names) != 2 or 'pilot-config.json' not in names
+                      or sum(x.file_size for x in outer.infolist()) > 20*1024*1024):
                   raise SystemExit('Pacote de transferência inesperado.')
-              data=outer.read('wms-m17-github-pages.zip')
-              config=json.loads(outer.read('pilot-config.json'))
-          if hashlib.sha256(data).hexdigest() != '4c1b1b3c570ae804667471ce6844ead287e0958369f40f0ed8055c2965f505a4':
+              static = next(name for name in names if name != 'pilot-config.json')
+              if static not in releases:
+                  raise SystemExit('Versão estática não reconhecida.')
+              data = outer.read(static)
+              config = json.loads(outer.read('pilot-config.json'))
+          expected, theme = releases[static]
+          if hashlib.sha256(data).hexdigest() != expected:
               raise SystemExit('ZIP estático não corresponde à versão aprovada.')
-          if set(config) != {'url','key','restaurant'} or config['url'] != 'https://xeyxoetdtgqhtlesfdme.supabase.co' or not re.fullmatch(r'sb_publishable_[A-Za-z0-9_-]{16,}',config['key']) or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}',config['restaurant'],re.I):
+          if not isinstance(config,dict) or set(config) != {'url','key','restaurant'} or config['url'] != 'https://xeyxoetdtgqhtlesfdme.supabase.co' or not re.fullmatch(r'sb_publishable_[A-Za-z0-9_-]{16,}',config['key']) or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}',config['restaurant'],re.I):
               raise SystemExit('Configuração pública inválida.')
-          site=Path('_site')
+          site = Path('_site')
           site.mkdir()
           with ZipFile(io.BytesIO(data)) as archive:
-              if len(archive.infolist()) > 100 or sum(item.file_size for item in archive.infolist()) > 20*1024*1024:
-                  raise SystemExit('Tamanho do artefato inesperado.')
+              names = archive.namelist()
+              if (len(names) > 100 or len(names) != len(set(names))
+                      or sum(item.file_size for item in archive.infolist()) > 20*1024*1024):
+                  raise SystemExit('Estrutura do artefato inesperada.')
+              required = {'index.html','manifest.webmanifest','sw-m13.js','install.js','.nojekyll',
+                          'icons/wms-192.png','icons/wms-512.png'}
+              manifest = json.loads(archive.read('manifest.webmanifest'))
+              if (not required.issubset(names) or manifest.get('theme_color') != theme
+                      or manifest.get('start_url') != './?mobile=true' or manifest.get('scope') != './'):
+                  raise SystemExit('Ativos ou manifesto do PWA incorretos.')
               for item in archive.infolist():
-                  path=PurePosixPath(item.filename)
-                  allowed=path.as_posix() in {'.nojekyll','index.html','manifest.webmanifest','install.js','sw-m13.js','favicon.ico','modelo-catalogo.csv','modelo-catalogo.xlsx','modelo-faturamento.csv','modelo-faturamento.xlsx','modelo-movimentacoes.csv','modelo-movimentacoes.xlsx','exemplo-nfe.xml'} or (path.parts[:2]==('_expo','static') and path.suffix in {'.js','.css'}) or (path.parts[:1]==('assets',) and path.suffix=='.wasm') or path.as_posix() in {'icons/wms-192.png','icons/wms-512.png','icons/apple-touch-icon.png'}
-                  if not allowed or path.is_absolute() or '..' in path.parts or chr(92) in item.filename:
+                  path = PurePosixPath(item.filename)
+                  allowed = path.as_posix() in required | {'favicon.ico','modelo-catalogo.csv',
+                      'modelo-catalogo.xlsx','modelo-faturamento.csv','modelo-faturamento.xlsx',
+                      'modelo-movimentacoes.csv','modelo-movimentacoes.xlsx','exemplo-nfe.xml',
+                      'icons/apple-touch-icon.png'} or (
+                      path.parts[:2] == ('_expo','static') and path.suffix in {'.js','.css'}) or (
+                      path.parts[:1] == ('assets',) and path.suffix == '.wasm')
+                  if (not allowed or path.is_absolute() or '..' in path.parts or chr(92) in item.filename
+                          or path.as_posix() != item.filename):
                       raise SystemExit('Entrada não permitida no artefato.')
-                  target=site.joinpath(*path.parts)
+                  target = site.joinpath(*path.parts)
                   target.parent.mkdir(parents=True,exist_ok=True)
                   target.write_bytes(archive.read(item))
           (site/'pilot-config.json').write_text(json.dumps(config)+'\n')
+          print('Ativos conferidos para ' + static)
           PY
       - uses: actions/upload-pages-artifact@v3
         with:
