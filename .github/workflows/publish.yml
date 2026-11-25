@@ -2,8 +2,20 @@ name: Publicar WMS sem PAT
 on:
   push:
     branches: [main]
-    paths: ['wms-piloto-publicacao.zip']
+    paths:
+      - 'wms-piloto-publicacao.zip'
+      - 'wms-m18-transferencia.zip'
+      - 'wms-m18-transferencia (1).zip'
+      - '.github/workflows/publish.yml'
   workflow_dispatch:
+    inputs:
+      package:
+        description: 'Pacote a publicar'
+        type: choice
+        default: m18-transfer
+        options:
+          - m18-transfer
+          - standard
 permissions:
   contents: read
   pages: write
@@ -22,17 +34,70 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Validar pacote aprovado e preparar site
+          fetch-depth: 0
+      - name: Selecionar pacote enviado
+        id: package
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          SELECTED_PACKAGE: ${{ inputs.package }}
         run: |
           python3 - <<'PY'
-          import hashlib, io, json, re
+          import os, subprocess
+          from pathlib import Path
+          standard='wms-piloto-publicacao.zip'
+          transfers=['wms-m18-transferencia.zip','wms-m18-transferencia (1).zip']
+          selected=os.environ.get('SELECTED_PACKAGE','')
+          if os.environ['EVENT_NAME']=='push':
+              before=os.environ.get('BEFORE_SHA','')
+              changed=set()
+              if len(before)==40 and before!='0'*40:
+                  changed=set(subprocess.check_output(['git','diff','--name-only',before,'HEAD'],text=True).splitlines())
+              candidates=[name for name in transfers if name in changed and Path(name).is_file()]
+              if standard in changed and Path(standard).is_file():
+                  if candidates:
+                      raise SystemExit('Dois tipos de pacote alterados. Selecione explicitamente pelo Run workflow.')
+                  selected='standard'
+              else:
+                  selected='m18-transfer' if candidates or any(Path(name).is_file() for name in transfers) else 'standard'
+          if selected=='standard':
+              filename=standard
+          elif selected=='m18-transfer':
+              # Prefer the canonical artifact; duplicate downloads are supported.
+              filename=next((name for name in transfers if Path(name).is_file()),None)
+              if not filename:
+                  raise SystemExit('Pacote M18 de transferência não encontrado.')
+          else:
+              raise SystemExit('Seleção de pacote inválida.')
+          if not Path(filename).is_file():
+              raise SystemExit('Pacote não encontrado: '+filename)
+          with open(os.environ['GITHUB_OUTPUT'],'a') as out:
+              out.write('filename='+filename+'\n')
+          print('Pacote selecionado: '+filename)
+          PY
+      - name: Validar pacote aprovado e preparar site
+        env:
+          WMS_PACKAGE: ${{ steps.package.outputs.filename }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, io, json, re, os
           from pathlib import Path, PurePosixPath
           from zipfile import ZipFile
           releases = {
               'wms-m17-github-pages.zip': ('4c1b1b3c570ae804667471ce6844ead287e0958369f40f0ed8055c2965f505a4','#0f172a'),
               'wms-m18-github-pages.zip': ('dc55e5c5741745f4ae4613606220460ffc51a927d6120855cdafcfb7e79472db','#800b25'),
           }
-          with ZipFile('wms-piloto-publicacao.zip') as outer:
+          package = Path(os.environ['WMS_PACKAGE'])
+          if package.name == 'wms-piloto-publicacao.zip':
+              payload = package.read_bytes()
+          else:
+              # The Actions download contains the actual publication ZIP and the workflow.
+              # The nested workflow is never executed or copied to the site.
+              with ZipFile(package) as transfer:
+                  if sorted(transfer.namelist()) != ['publish.yml','wms-piloto-publicacao.zip'] or sum(item.file_size for item in transfer.infolist()) > 20*1024*1024:
+                      raise SystemExit('Artefato de transferência inesperado.')
+                  payload = transfer.read('wms-piloto-publicacao.zip')
+          with ZipFile(io.BytesIO(payload)) as outer:
               names = outer.namelist()
               if (len(names) != 2 or 'pilot-config.json' not in names
                       or sum(x.file_size for x in outer.infolist()) > 20*1024*1024):
@@ -75,6 +140,12 @@ jobs:
                   target.parent.mkdir(parents=True,exist_ok=True)
                   target.write_bytes(archive.read(item))
           (site/'pilot-config.json').write_text(json.dumps(config)+'\n')
+          version = 'M18' if static == 'wms-m18-github-pages.zip' else 'M17'
+          if package.name != 'wms-piloto-publicacao.zip' and version != 'M18':
+              raise SystemExit('O artefato de transferência M18 não contém a versão M18.')
+          (site/'wms-version.json').write_text(json.dumps({'version':version,'sha256':expected})+'\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as summary:
+              summary.write('### Versão publicada: '+version+'\n\nPacote validado: '+static+'\n')
           print('Ativos conferidos para ' + static)
           PY
       - uses: actions/upload-pages-artifact@v3
